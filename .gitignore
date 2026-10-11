@@ -1,0 +1,59 @@
+# Local credentials, account configuration, state and API diagnostics.
+# Add sanitized example configurations explicitly if needed later.
+*.json
+*.json.*
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+secrets*
+
+# Finance databases, exports and logs.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.csv
+*.log
+*.txt
+!requirements*.txt
+!README*.txt
+
+# Transfer packages include account credentials. Exclude the entire package.
+/transfer*/
+*.zip
+*.7z
+*.rar
+/mrr_v81_6_21_fast_grab_pool_fee/
+
+# Python and local tooling.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+/tmp*/
+.codex/
+.agents/
+.aws/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+*.bak
+*.tmp
+
+.superpowers/

@@ -23,6 +23,11 @@ for module in "$PROJECT_DIR"/hash_router/*.py; do
 done
 python3 -m venv /opt/hash-router/.venv
 /opt/hash-router/.venv/bin/python -m pip install -r "$PROJECT_DIR/deploy/hash_router/requirements.txt"
+# umask 027 creates root-only directories for the service unless its group is set.
+# Keep the environment root-owned; the service gets read/traverse/execute only.
+# -hR changes symlinks themselves, never the system Python they point to.
+chgrp -hR hash-router /opt/hash-router/.venv
+chmod -R g+rX,o-rwx /opt/hash-router/.venv
 python3 "$PROJECT_DIR/deploy/hash_router/install_files.py" \
   "$PROJECT_DIR/deploy/hash_router/config.example.json" /etc/hash-router/config.json
 chown root:hash-router /etc/hash-router/config.json

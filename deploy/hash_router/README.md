@@ -1,4 +1,4 @@
-# Debian Hash Router 82.0.13
+# Debian Hash Router 82.0.14
 
 Debian 12/13, Python >=3.11. Из корня репозитория:
 

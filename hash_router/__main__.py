@@ -5,6 +5,7 @@ import json
 import signal
 from pathlib import Path
 from aiohttp import web
+from . import __version__
 from .control import validate_service_config,tls_context,create_control_app
 from .state import AtomicState
 from .runtime import RouterRuntime
@@ -35,6 +36,7 @@ async def serve(config):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Experimental Scrypt hash router for Debian')
+    parser.add_argument('--version',action='version',version='Hash Router '+__version__)
     parser.add_argument('--config',required=True,type=Path)
     parser.add_argument('--check-config',action='store_true')
     args=parser.parse_args(argv)

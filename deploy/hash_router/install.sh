@@ -37,7 +37,7 @@ systemctl daemon-reload
 read -r -p 'Public VPS IP or DNS name: ' PUBLIC_ROUTER_HOST
 read -r -p 'HTTPS API port [8443]: ' ROUTER_API_PORT
 ROUTER_API_PORT="${ROUTER_API_PORT:-8443}"
-python3 "$PROJECT_DIR/deploy/hash_router/setup_connection.py" --host "$PUBLIC_ROUTER_HOST" --port "$ROUTER_API_PORT"
+python3 "$PROJECT_DIR/deploy/hash_router/setup_connection.py" --host "$PUBLIC_ROUTER_HOST" --port "$ROUTER_API_PORT" --quiet
 python3 - <<'PY'
 import grp,json,os
 from pathlib import Path
@@ -61,3 +61,5 @@ fi
 echo "Router started. Allow TCP ${ROUTER_API_PORT} and ${ROUTER_STRATUM_BASE}..${ROUTER_STRATUM_END} in your VPS provider firewall."
 echo 'Use the VPS address, API port and access key printed above; verify the TLS fingerprint through SSH.'
 echo 'SBP needs certificate-pin support for this file-free connection. See README for legacy SBP.'
+# Keep the actual saved address/key visible after all install and firewall output.
+python3 "$PROJECT_DIR/deploy/hash_router/setup_connection.py" --host "$PUBLIC_ROUTER_HOST" --port "$ROUTER_API_PORT"

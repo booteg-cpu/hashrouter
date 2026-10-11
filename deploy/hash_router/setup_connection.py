@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import ssl
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
@@ -90,11 +91,36 @@ def initialize(directory,state_dir,public_host,port=8443,openssl='openssl',*,exp
     return bundle,config
 
 
+def show_connection(bundle,config,fingerprint,*,export_connection=False):
+    color=sys.stdout.isatty() and 'NO_COLOR' not in os.environ
+    def emphasized(value,code='1;36'):
+        return '\033['+code+'m'+value+'\033[0m' if color else value
+    print('\n'+'='*64)
+    print(emphasized('HASH ROUTER - CONNECTION SETTINGS','1;32'))
+    print('='*64)
+    print('VPS IP / DNS: '+emphasized(bundle['public_host']))
+    print('HTTPS API port: '+emphasized(str(config['control_port'])))
+    print('SBP connection address: '+bundle['url'])
+    print('\nSBP access key (copy the next line):')
+    print(emphasized(bundle['token']))
+    print('\nTLS certificate SHA-256 (two lines):')
+    print(fingerprint[:47])
+    print(fingerprint[48:])
+    print('Compare this fingerprint over trusted SSH before trusting the server in SBP.')
+    print('Do not send the access key before the certificate has been verified.')
+    if export_connection:
+        print('Optional import file: /etc/hash-router/sbp-connection.json (contains the access key).')
+    print('File-free connection requires certificate-pin support in SBP.')
+    print('HTTPS certificate expires after 365 days; renew using the existing CA.')
+    print('='*64+'\n')
+
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--host',required=True)
     parser.add_argument('--port',type=int,default=8443)
     parser.add_argument('--export-connection',action='store_true',
                         help='Also write the optional legacy SBP import file')
+    parser.add_argument('--quiet',action='store_true',help='Do not print connection credentials')
     args=parser.parse_args()
     try:
         bundle,config=initialize('/etc/hash-router','/var/lib/hash-router',args.host,args.port,
@@ -102,17 +128,8 @@ def main():
         fingerprint=certificate_fingerprint(config['tls_certificate'])
     except (ValueError,OSError,KeyError,subprocess.CalledProcessError):
         parser.exit(2,'Connection setup failed; existing credentials/state were preserved. Check TLS files and public address.\n')
-    print('SBP connection address: '+bundle['url'])
-    print('VPS IP / DNS: '+config.get('public_host',args.host))
-    print('HTTPS API port: '+str(config['control_port']))
-    print('SBP access key: '+bundle['token'])
-    print('TLS certificate SHA-256: '+fingerprint)
-    print('Compare this fingerprint over trusted SSH before trusting the server in SBP.')
-    print('Do not send the access key before the certificate has been verified.')
-    if args.export_connection:
-        print('Optional import file: /etc/hash-router/sbp-connection.json (contains the access key).')
-    print('With certificate-pin support, SBP needs only the VPS IP, API port and access key; no file transfer.')
-    print('HTTPS certificate expires after 365 days; renew before expiry using the existing CA.')
+    if not args.quiet:
+        show_connection(bundle,config,fingerprint,export_connection=args.export_connection)
 
 
 if __name__=='__main__':main()

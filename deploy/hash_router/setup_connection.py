@@ -1,10 +1,12 @@
 """Initial Debian connection setup; reruns preserve existing credentials/state."""
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
 import re
 import secrets
+import ssl
 import subprocess
 import tempfile
 from pathlib import Path
@@ -31,7 +33,14 @@ def write_json(path,value):
         if os.path.exists(name):os.unlink(name)
 
 
-def initialize(directory,state_dir,public_host,port=8443,openssl='openssl'):
+def certificate_fingerprint(path):
+    """SHA-256 of the leaf certificate DER, as seen in the TLS handshake."""
+    der=ssl.PEM_cert_to_DER_cert(Path(path).read_text(encoding='ascii'))
+    digest=hashlib.sha256(der).hexdigest().upper()
+    return ':'.join(digest[index:index+2] for index in range(0,len(digest),2))
+
+
+def initialize(directory,state_dir,public_host,port=8443,openssl='openssl',*,export_connection=False):
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
     public_host=host_name(public_host)
     if type(port) is not int or not 1<=port<=65535 or 3333<=port<=3433:
@@ -69,7 +78,6 @@ def initialize(directory,state_dir,public_host,port=8443,openssl='openssl'):
         write_json(path,config)
     if len(config.get('api_token',''))<32:raise ValueError('Invalid existing API token')
     public_host=host_name(config.get('public_host') or public_host)
-    import ssl
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(config['tls_certificate'],config['tls_key'])
     ca_path=config.get('connection_ca_path')
@@ -77,20 +85,33 @@ def initialize(directory,state_dir,public_host,port=8443,openssl='openssl'):
     authority='['+public_host+']' if ':' in public_host else public_host
     bundle={'format':'hashroute-connection-v1','url':f'https://{authority}:{int(config["control_port"])}',
             'token':config['api_token'],'public_host':public_host,'tls_ca_pem':public_ca}
-    write_json(directory/'sbp-connection.json',bundle)
+    if export_connection:
+        write_json(directory/'sbp-connection.json',bundle)
     return bundle,config
 
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--host',required=True)
     parser.add_argument('--port',type=int,default=8443)
+    parser.add_argument('--export-connection',action='store_true',
+                        help='Also write the optional legacy SBP import file')
     args=parser.parse_args()
-    try:bundle,config=initialize('/etc/hash-router','/var/lib/hash-router',args.host,args.port)
+    try:
+        bundle,config=initialize('/etc/hash-router','/var/lib/hash-router',args.host,args.port,
+                                 export_connection=args.export_connection)
+        fingerprint=certificate_fingerprint(config['tls_certificate'])
     except (ValueError,OSError,KeyError,subprocess.CalledProcessError):
         parser.exit(2,'Connection setup failed; existing credentials/state were preserved. Check TLS files and public address.\n')
     print('SBP connection address: '+bundle['url'])
+    print('VPS IP / DNS: '+config.get('public_host',args.host))
+    print('HTTPS API port: '+str(config['control_port']))
     print('SBP access key: '+bundle['token'])
-    print('Import file: /etc/hash-router/sbp-connection.json (contains the access key).')
+    print('TLS certificate SHA-256: '+fingerprint)
+    print('Compare this fingerprint over trusted SSH before trusting the server in SBP.')
+    print('Do not send the access key before the certificate has been verified.')
+    if args.export_connection:
+        print('Optional import file: /etc/hash-router/sbp-connection.json (contains the access key).')
+    print('With certificate-pin support, SBP needs only the VPS IP, API port and access key; no file transfer.')
     print('HTTPS certificate expires after 365 days; renew before expiry using the existing CA.')
 
 

@@ -54,4 +54,5 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; the
   ufw allow "${ROUTER_STRATUM_BASE}:${ROUTER_STRATUM_END}/tcp"
 fi
 echo "Router started. Allow TCP ${ROUTER_API_PORT} and ${ROUTER_STRATUM_BASE}..${ROUTER_STRATUM_END} in your VPS provider firewall."
-echo 'Download /etc/hash-router/sbp-connection.json through your SSH connection and import it in SBP.'
+echo 'Use the VPS address, API port and access key printed above; verify the TLS fingerprint through SSH.'
+echo 'SBP needs certificate-pin support for this file-free connection. See README for legacy SBP.'

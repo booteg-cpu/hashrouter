@@ -62,12 +62,30 @@ class ConnectionSetupTests(unittest.TestCase):
                     setup.main()
         self.assertFalse(init.call_args.kwargs['export_connection'])
         self.assertIn('HTTPS API port: 8443', output.getvalue())
-        self.assertIn(setup.certificate_fingerprint(self.cert), output.getvalue())
+        self.assertIn(setup.certificate_fingerprint(self.cert)[:47], output.getvalue())
+        self.assertIn(setup.certificate_fingerprint(self.cert)[48:], output.getvalue())
         self.assertNotIn('Optional import file:', output.getvalue())
+
+    def test_quiet_setup_does_not_print_credentials(self):
+        bundle,config=self.initialize()
+        output=io.StringIO()
+        with patch.object(setup,'initialize',return_value=(bundle,config)):
+            with patch('sys.argv',['setup_connection','--host','127.0.0.1','--quiet']):
+                with redirect_stdout(output):setup.main()
+        self.assertEqual('',output.getvalue())
+
+    def test_summary_key_has_own_line_and_tty_highlighting(self):
+        bundle,config=self.initialize()
+        output=io.StringIO()
+        with patch.object(output,'isatty',return_value=True),patch.dict(setup.os.environ,{},clear=True):
+            with redirect_stdout(output):
+                setup.show_connection(bundle,config,setup.certificate_fingerprint(self.cert))
+        self.assertIn('\n\033[1;36m'+bundle['token']+'\033[0m\n',output.getvalue())
+        self.assertIn('\033[1;32mHASH ROUTER',output.getvalue())
 
     def test_version_requires_no_config_or_listeners(self):
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(SystemExit) as result:
             router_main(['--version'])
         self.assertEqual(0, result.exception.code)
-        self.assertEqual('Hash Router 82.0.14', output.getvalue().strip())
+        self.assertEqual('Hash Router 82.0.15', output.getvalue().strip())

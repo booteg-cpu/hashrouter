@@ -1,0 +1,11 @@
+{
+  "api_token": "CHANGE_ME_USE_A_RANDOM_TOKEN_AT_LEAST_32_CHARACTERS",
+  "tls_certificate": "/etc/hash-router/fullchain.pem",
+  "tls_key": "/etc/hash-router/privkey.pem",
+  "state_path": "/var/lib/hash-router/state.json",
+  "stratum_host": "0.0.0.0",
+  "stratum_port": 3333,
+  "control_host": "0.0.0.0",
+  "control_port": 8443,
+  "max_connections": 128
+}

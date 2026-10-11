@@ -1,4 +1,4 @@
-# Hash Router 82.0.13
+# Hash Router 82.0.14
 
 Экспериментальный сервер Stratum для Debian 12/13, Python 3.11+.
 Принимает мощность одного алгоритма и распределяет её между заданными
@@ -66,5 +66,31 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests_hash_router -t . -v
 ```
 
-Версия 82.0.13 добавляет вывод отпечатка и необязательный экспорт подключения. Движок и API
+Версия 82.0.14 исправляет права виртуального окружения для пользователя службы. Движок и API
 совместимы с предыдущей сборкой; живое оборудование этими тестами не проверяется.
+
+## Исправление установки 82.0.13
+
+При `runuser: ... python: Permission denied` обновите исходники и повторите
+установщик. Версия 82.0.14 исправляет права существующего окружения:
+
+```bash
+git switch main
+git pull --ff-only
+sudo bash install-router.sh
+```
+
+Для восстановления без обновления, от root на VPS:
+
+```bash
+chgrp -hR hash-router /opt/hash-router/.venv
+chmod -R g+rX,o-rwx /opt/hash-router/.venv
+cd /opt/hash-router
+runuser -u hash-router -- .venv/bin/python -m hash_router --config /etc/hash-router/config.json --check-config
+systemctl enable --now hash-router
+systemctl is-active hash-router
+```
+
+Проверка запуска должна завершиться успешно. Ручное восстановление не открывает
+порты firewall: проверьте правила VPS для API и Stratum. Секреты находятся в
+/etc/hash-router, а не в виртуальном окружении; их права не расширяются.

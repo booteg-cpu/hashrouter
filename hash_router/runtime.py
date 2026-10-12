@@ -10,6 +10,7 @@ from .protocol import StratumSession,read_message,write_message,ProtocolError,Re
 from .jobs import JobBook,JobError,IncompatibleExtranonce
 from .scheduler import Scheduler
 from .metrics import Metrics
+from .eventlog import EventLog
 
 
 @dataclass
@@ -38,18 +39,30 @@ class InputConnection:
 
 
 class RouterRuntime:
-    def __init__(self,state,clock=time.monotonic,wall_clock=time.time,max_connections=128,metrics=None):
+    def __init__(self,state,clock=time.monotonic,wall_clock=time.time,max_connections=128,metrics=None,event_log=None,algorithm=''):
+        self.event_log=event_log or EventLog();self.algorithm=algorithm
         self.state=state;self.clock=clock;self.wall_clock=wall_clock;self.max_connections=max_connections
         raw=state.load();self.snapshot=RouterSnapshot.from_dict(raw) if raw else None
         self.scheduler=Scheduler(self.snapshot,clock,wall_clock) if self.snapshot else None
         self.jobs=JobBook(clock);self.metrics=metrics or Metrics(clock,wall_clock=wall_clock)
         self.outputs={};self.clients={};self.client_tasks=set()
         self.server=None;self.port=None;self.running=False;self.apply_lock=asyncio.Lock()
+        self._summary_at=0;self._allocation_state={}
+        if self.snapshot:self._protect(self.snapshot)
+
+    def _protect(self,snapshot):
+        endpoints=[snapshot.remainder]+[o.endpoint for o in snapshot.outputs if o.endpoint]
+        self.event_log.protect(*(v for e in endpoints for v in (e.username,e.password)),
+                               *(v for s in snapshot.sources for v in (s.username,s.password)))
+
+    def log(self,event,level='INFO',**fields):
+        self.event_log.emit(event,level,algorithm=self.snapshot.algorithm if self.snapshot else self.algorithm,**fields)
 
     @property
     def connection_count(self): return len(self.clients)
 
     async def apply(self,snapshot):
+        self._protect(snapshot)
         async with self.apply_lock:
             if self.snapshot:
                 if snapshot.algorithm!=self.snapshot.algorithm:raise ValueError('Cannot change routing algorithm')
@@ -80,6 +93,7 @@ class RouterRuntime:
                         context.writer.close()
             if self.running: await self._reconcile()
             self._wake_clients()
+            self.log('configuration_applied',revision=snapshot.revision,sources=len(snapshot.sources),outputs=len(snapshot.outputs))
 
     async def start(self,host,port):
         if self.running: raise RuntimeError('Runtime is already running')
@@ -87,6 +101,7 @@ class RouterRuntime:
         try:
             self.server=await asyncio.start_server(self._handle_client,host,port,limit=65537)
             self.port=self.server.sockets[0].getsockname()[1]
+            self.log('listener_started',host=host,port=self.port)
             if self.snapshot: await self._reconcile()
         except BaseException:
             await self.stop();raise
@@ -97,10 +112,12 @@ class RouterRuntime:
         for key,slot in tuple(self.outputs.items()):
             if desired.get(key)!=slot.configured_endpoint:
                 if slot.task: slot.task.cancel();await asyncio.gather(slot.task,return_exceptions=True)
+                self.log('output_removed',output_id=key)
                 self.outputs.pop(key);self.scheduler.set_ready(key,False)
         for key,endpoint in desired.items():
             if key not in self.outputs:
                 slot=OutputConnection(endpoint,endpoint);self.outputs[key]=slot
+                self.log('output_configured',output_id=key,host=endpoint.host,port=endpoint.port)
                 slot.task=asyncio.create_task(self._output_loop(key,slot))
 
     def _wake_clients(self):
@@ -120,8 +137,11 @@ class RouterRuntime:
         try:
             while self.running:
                 session=StratumSession(slot.endpoint);slot.session=session;slot.state='connecting'
+                started=self.clock()
+                self.log('output_connecting','DEBUG',output_id=key,host=slot.endpoint.host,port=slot.endpoint.port)
                 try:
                     await session.connect();slot.state='awaiting_job';slot.difficulty=Decimal(1);slot.rotate=False
+                    self.log('output_authorized',output_id=key,duration_ms=round((self.clock()-started)*1000))
                     while self.running and not session.closed:
                         if slot.rotate: break
                         try: message=await asyncio.wait_for(session.notifications.get(),.1)
@@ -131,12 +151,15 @@ class RouterRuntime:
                             if len(params)!=1: raise ProtocolError('Invalid difficulty')
                             slot.difficulty=number(params[0],'difficulty',positive=True)
                             if slot.difficulty>Decimal('1e30'): raise ProtocolError('Unsupported difficulty')
+                            self.log('difficulty_changed','DEBUG',output_id=key,difficulty=str(slot.difficulty))
                         elif method=='mining.notify':
                             if len(params)!=9: raise ProtocolError('Invalid mining job')
                             # Invalidate clean jobs even before a downstream selects this output.
                             if params[8] and slot.latest!=params:
                                 self.jobs.invalidate(key,session.generation,clear_prefixes=False)
+                            first=slot.state!='ready'
                             slot.latest=list(params);slot.state='ready';self.scheduler.set_ready(key,True)
+                            self.log('output_ready' if first else 'job_received','INFO' if first else 'DEBUG',output_id=key)
                             backoff=.25;self._wake_clients()
                         elif method=='mining.set_extranonce':
                             if len(params)!=2 or not isinstance(params[0],str) or not isinstance(params[1],int):
@@ -151,8 +174,10 @@ class RouterRuntime:
                         elif method=='client.get_version' and message.get('id') is not None:
                             async with session.write_lock:
                                 await write_message(session.writer,{'id':message['id'],'result':'scrypt-hash-router/0.1','error':None})
-                except (ConnectionError,OSError,TimeoutError,ValueError):
+                except (ConnectionError,OSError,TimeoutError,ValueError) as exc:
                     slot.state='disconnected'
+                    self.log('output_disconnected','WARNING',output_id=key,error_type=type(exc).__name__,retry_seconds=backoff,
+                             reason='upstream_rejected' if isinstance(exc,RemoteError) else 'connection_or_protocol_failure')
                 finally:
                     self.scheduler.set_ready(key,False);slot.latest=None
                     if slot.state in ('ready','awaiting_job','connecting'): slot.state='reconnecting'
@@ -175,8 +200,10 @@ class RouterRuntime:
         task=asyncio.current_task();self.client_tasks.add(task)
         context=InputConnection(uuid.uuid4().hex,reader,writer)
         if len(self.clients)>=self.max_connections:
+            self.log('input_connection_limit','WARNING',connections=len(self.clients))
             writer.close();self.client_tasks.discard(task);return
         self.clients[context.connection_id]=context
+        self.log('input_connected',connection=context.connection_id)
         try:
             while self.running:
                 request=await read_message(reader,timeout=600 if context.source else 15)
@@ -194,6 +221,8 @@ class RouterRuntime:
                                      and hmac.compare_digest(s.password.encode(),params[1].encode())),None)
                     if context.source is not None: source=None
                     await self._reply(context,request_id,source is not None)
+                    self.log('input_authorized' if source else 'input_authorization_failed','INFO' if source else 'WARNING',
+                             connection=context.connection_id,source_id=source.source_id if source else None)
                     if source is None: break
                     context.source=source;self.scheduler.set_connection_capacity(context.connection_id,source.source_id,Decimal(0))
                     context.sender=asyncio.create_task(self._sender_loop(context))
@@ -209,13 +238,16 @@ class RouterRuntime:
                 elif method=='client.get_version': await self._reply(context,request_id,'scrypt-hash-router/0.1')
                 elif method=='mining.suggest_difficulty': await self._reply(context,request_id,False)
                 else: await self._reply(context,request_id,False,[20,'Unsupported method',None])
-        except (ConnectionError,OSError,TimeoutError,ValueError): pass
+        except (ConnectionError,OSError,TimeoutError,ValueError) as exc:
+            self.log('input_error','WARNING',connection=context.connection_id,error_type=type(exc).__name__)
         finally:
             if context.sender: context.sender.cancel();await asyncio.gather(context.sender,return_exceptions=True)
             for submit in tuple(context.submits): submit.cancel()
             await asyncio.gather(*context.submits,return_exceptions=True)
             if self.scheduler: self.scheduler.remove_connection(context.connection_id)
             self.clients.pop(context.connection_id,None);self.client_tasks.discard(task)
+            self._allocation_state.pop(context.connection_id,None)
+            self.log('input_disconnected',connection=context.connection_id)
             writer.close()
             try: await writer.wait_closed()
             except (ConnectionError,OSError): pass
@@ -229,9 +261,14 @@ class RouterRuntime:
                     self.scheduler.record_elapsed(context.connection_id,last,elapsed)
                     self.metrics.record_allocation(last,elapsed);last=None
                 source=next((s for s in self.snapshot.sources if s.source_id==context.source.source_id),None)
-                if source is None or source.expires_at<=self.wall_clock(): context.writer.close();return
+                if source is None or source.expires_at<=self.wall_clock():
+                    self.log('source_expired',connection=context.connection_id,source_id=context.source.source_id)
+                    context.writer.close();return
                 context.wake.clear()
                 output=self.scheduler.choose(context.connection_id)
+                if self._allocation_state.get(context.connection_id,'unset')!=output:
+                    self._allocation_state[context.connection_id]=output
+                    self.log('allocation_changed','DEBUG',connection=context.connection_id,output_id=output or 'none')
                 if output is not None:
                     slot=self.outputs.get(output)
                     if slot and slot.session and slot.latest and not slot.session.closed:
@@ -242,12 +279,16 @@ class RouterRuntime:
                             await self._send(context,{'id':None,'method':'mining.notify','params':job})
                             last=output;started=self.clock()
                         except IncompatibleExtranonce:
+                            self.log('output_incompatible','WARNING',output_id=output,reason='extranonce')
                             slot.state='incompatible';slot.rotate=True;self.scheduler.set_ready(output,False)
                         except JobError:
+                            self.log('invalid_job','WARNING',output_id=output)
                             slot.state='invalid_job';slot.latest=None;self.scheduler.set_ready(output,False)
                 try: await asyncio.wait_for(context.wake.wait(),self.snapshot.quantum_seconds)
                 except TimeoutError: pass
-        except (ConnectionError,OSError,ValueError): context.writer.close()
+        except (ConnectionError,OSError,ValueError) as exc:
+            self.log('sender_error','WARNING',connection=context.connection_id,error_type=type(exc).__name__)
+            context.writer.close()
         finally:
             if last is not None:
                 elapsed=Decimal(str(max(0,self.clock()-started)))
@@ -255,6 +296,7 @@ class RouterRuntime:
                 self.metrics.record_allocation(last,elapsed)
 
     async def _submit(self,context,request_id,params):
+        started=self.clock()
         try:
             route=self.jobs.route_submit(context.connection_id,params)
             slot=self.outputs.get(route.output_id)
@@ -266,6 +308,8 @@ class RouterRuntime:
             except RemoteError:
                 accepted=False
             self.metrics.record_submit(route,accepted is True)
+            self.log('share_accepted' if accepted is True else 'share_rejected','DEBUG',
+                     connection=context.connection_id,output_id=route.output_id,duration_ms=round((self.clock()-started)*1000))
             if accepted is True:
                 rates=self.metrics.connection_rates()
                 for connection,rate in rates.items():
@@ -274,8 +318,10 @@ class RouterRuntime:
                         self.scheduler.set_connection_capacity(connection,live.source.source_id,rate)
             await self._reply(context,request_id,accepted is True,None if accepted is True else [20,'Share rejected',None])
         except JobError:
+            self.log('share_stale','DEBUG',connection=context.connection_id)
             await self._reply(context,request_id,False,[21,'Unknown or stale job',None])
-        except (ConnectionError,OSError,TimeoutError):
+        except (ConnectionError,OSError,TimeoutError) as exc:
+            self.log('share_outcome_unknown','WARNING',connection=context.connection_id,error_type=type(exc).__name__)
             try: await self._reply(context,request_id,False,[20,'Upstream outcome unknown',None])
             except (ConnectionError,OSError,TimeoutError): pass
 
@@ -289,12 +335,21 @@ class RouterRuntime:
             slot=self.outputs.get(row['output_id'])
             row['state']=slot.state if slot else 'unprovisioned'
             row['allocated_target_gh']=format(weights.get(row['output_id'],Decimal(0)),'f')
+        if self.clock()-self._summary_at>=30:
+            self._summary_at=self.clock()
+            for row in result.outputs:
+                self.log('output_summary',output_id=row['output_id'],status=row['state'],
+                         accepted=row.get('accepted',0),rejected=row.get('rejected',0),stale=row.get('stale',0),
+                         target_gh=row['target_gh'],allocated_gh=row['allocated_target_gh'],
+                         shortage_gh=str(max(Decimal(0),Decimal(row['target_gh'])-weights.get(row['output_id'],Decimal(0)))),
+                         connections=len(self.clients))
         shortages={o.output_id:format(max(Decimal(0),o.target_gh-weights.get(o.output_id,Decimal(0))),'f') for o in self.snapshot.outputs}
         connections={key:{'gh':format(gh,'f'),'kind':'nominal' if self.scheduler.connections[key][1]==0 else 'measured'}
                      for key,gh in self.scheduler.connection_capacities.items()}
         return replace(result,connections=connections,shortages=shortages)
 
     async def stop(self):
+        was_running=self.running
         self.running=False
         server=self.server
         if server: server.close()
@@ -304,3 +359,4 @@ class RouterRuntime:
         await asyncio.gather(*tasks,return_exceptions=True)
         if server: await server.wait_closed()
         self.server=None
+        if was_running:self.log('listener_stopped',port=self.port)

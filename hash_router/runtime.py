@@ -256,6 +256,12 @@ class RouterRuntime:
                 elif method=='mining.configure':
                     extensions=params[0] if params and isinstance(params[0],list) else []
                     await reply(request_id,{extension:False for extension in extensions if isinstance(extension,str)})
+                    if handshake_count<=32:
+                        known={'version-rolling','minimum-difficulty','subscribe-extranonce','info'}
+                        names=sorted({e for e in extensions if isinstance(e,str) and e in known})
+                        self.log('input_configure_result',connection=context.connection_id,
+                                 extensions=','.join(names),status='unsupported',
+                                 count=sum(1 for e in extensions if isinstance(e,str) and e not in known))
                 elif method=='client.get_version': await reply(request_id,'scrypt-hash-router/0.1')
                 elif method=='mining.suggest_difficulty': await reply(request_id,False)
                 else: await reply(request_id,False,[20,'Unsupported method',None])

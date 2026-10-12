@@ -39,6 +39,22 @@ class HandshakeLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual('none',rows[-1]['method'])
         self.assertFalse(rows[-1]['subscribed'])
 
+    async def test_configure_logs_only_known_names_and_preserves_reply(self):
+        rows,writer=await self.run_client([{'id':1,'method':'mining.configure',
+            'params':[['version-rolling','secret-extension','info'],{'secret-parameter':'secret-value'}]}])
+        result=next(r for r in rows if r['event']=='input_configure_result')
+        self.assertEqual('info,version-rolling',result['extensions'])
+        self.assertEqual('unsupported',result['status'])
+        self.assertEqual(1,result['count'])
+        self.assertNotIn('secret-',json.dumps(rows))
+        reply=json.loads(writer.write.call_args.args[0])
+        self.assertEqual({'version-rolling':False,'secret-extension':False,'info':False},reply['result'])
+
+    async def test_configure_diagnostics_are_bounded(self):
+        rows,_=await self.run_client([{'id':i,'method':'mining.configure',
+            'params':[['version-rolling'],{}]} for i in range(80)])
+        self.assertEqual(32,sum(r['event']=='input_configure_result' for r in rows))
+
     async def test_denial_hides_credentials(self):
         rows,_=await self.run_client([
             {'id':1,'method':'mining.subscribe','params':[]},

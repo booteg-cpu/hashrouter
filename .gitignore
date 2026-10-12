@@ -21,6 +21,8 @@ secrets*
 *.sqlite3-*
 *.csv
 *.log
+*.jsonl
+*.jsonl.*
 *.txt
 !requirements*.txt
 !README*.txt

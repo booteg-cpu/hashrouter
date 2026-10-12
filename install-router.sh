@@ -1,5 +1,5 @@
 #!/bin/sh
-# GitHub entry point, installer revision 82.0.15. Run with: sudo bash install-router.sh
+# GitHub entry point, installer revision 82.0.19. Run with: sudo bash install-router.sh
 set -eu
 case "$0" in
     */*) SCRIPT_PARENT=${0%/*} ;;
@@ -12,7 +12,7 @@ else
     echo 'Router package not found. Clone the complete hashrouter repository.' >&2
     exit 1
 fi
-for required in hash_router/__main__.py deploy/hash_router/setup_connection.py deploy/hash_router/config.example.json deploy/hash_router/requirements.txt deploy/hash_router/hash-router.service; do
+for required in hash_router/__main__.py hash_router/eventlog.py deploy/hash_router/setup_connection.py deploy/hash_router/config.example.json deploy/hash_router/requirements.txt deploy/hash_router/hash-router.service; do
     if [ ! -f "$ROUTER_ROOT/$required" ]; then
         echo "Incomplete router package: $required" >&2
         exit 1
@@ -23,7 +23,7 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 case "${1:-}" in
-    --check) echo 'Hash Router installer 82.0.15: package complete.'; exit 0 ;;
+    --check) echo 'Hash Router installer 82.0.19: package complete.'; exit 0 ;;
     '') ;;
     *) echo 'Usage: sudo bash install-router.sh [--check]' >&2; exit 2 ;;
 esac

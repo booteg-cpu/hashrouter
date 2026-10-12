@@ -7,5 +7,6 @@
   "stratum_port": 3333,
   "control_host": "0.0.0.0",
   "control_port": 8443,
-  "max_connections": 128
+  "max_connections": 128,
+  "log_level": "INFO"
 }

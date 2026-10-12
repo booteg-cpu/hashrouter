@@ -41,6 +41,7 @@ class InputConnection:
     version_mask: int | None = None
     diagnostics: dict = field(default_factory=lambda:dict(jobs_sent=0,submits_received=0,
         forward_attempts=0,accepted=0,rejected=0,local_rejected=0,outcome_unknown=0))
+    rejection_counts: dict = field(default_factory=dict)
     last_job_at: float | None = None
     last_submit_at: float | None = None
 
@@ -167,7 +168,7 @@ class RouterRuntime:
                             if len(params)!=9: raise ProtocolError('Invalid mining job')
                             # Invalidate clean jobs even before a downstream selects this output.
                             if params[8] and slot.latest!=params:
-                                self.jobs.invalidate(key,session.generation,clear_prefixes=False)
+                                self.jobs.invalidate(key,session.generation,clear_prefixes=False,reason='clean_job')
                             first=slot.state!='ready'
                             slot.latest=list(params);slot.state='ready';self.scheduler.set_ready(key,True)
                             self.log('output_ready' if first else 'job_received','INFO' if first else 'DEBUG',output_id=key)
@@ -176,14 +177,14 @@ class RouterRuntime:
                             if session.version_mask is None or len(params)!=1:
                                 raise ProtocolError('Unexpected version mask update')
                             session.version_mask=version_mask(params[0])
-                            self.jobs.invalidate(key,session.generation,clear_prefixes=False)
+                            self.jobs.invalidate(key,session.generation,clear_prefixes=False,reason='version_mask_changed')
                             self._wake_clients()
                         elif method=='mining.set_extranonce':
                             if len(params)!=2 or not isinstance(params[0],str) or not isinstance(params[1],int):
                                 raise ProtocolError('Invalid extranonce update')
                             bytes.fromhex(params[0])
                             if len(params[0])%2 or not 1<=params[1]<=32: raise ProtocolError('Invalid extranonce update')
-                            self.jobs.invalidate(key,session.generation);session.generation=uuid.uuid4().hex
+                            self.jobs.invalidate(key,session.generation,reason='extranonce_changed');session.generation=uuid.uuid4().hex
                             session.extranonce1=params[0];session.extranonce2_size=params[1]
                             slot.latest=None;self.scheduler.set_ready(key,False)
                         elif method=='client.reconnect':
@@ -198,7 +199,7 @@ class RouterRuntime:
                 finally:
                     self.scheduler.set_ready(key,False);slot.latest=None
                     if slot.state in ('ready','awaiting_job','connecting'): slot.state='reconnecting'
-                    self.jobs.invalidate(key,session.generation)
+                    self.jobs.invalidate(key,session.generation,reason='output_disconnected')
                     await session.close();self._wake_clients()
                 if self.running:
                     await asyncio.sleep(backoff);backoff=min(backoff*2,30)
@@ -370,10 +371,11 @@ class RouterRuntime:
                                     self.log('input_work_sent',connection=context.connection_id,output_id=output,
                                              count=context.diagnostics['jobs_sent'],difficulty=str(slot.difficulty))
                             last=output;started=self.clock()
-                        except IncompatibleExtranonce:
-                            self.log('output_incompatible','WARNING',output_id=output,reason='extranonce')
+                        except IncompatibleExtranonce as exc:
+                            self.log('output_incompatible','WARNING',output_id=output,reason=exc.reason,
+                                     upstream_extranonce2_bytes=slot.session.extranonce2_size)
                             slot.state='incompatible';slot.rotate=True;self.scheduler.set_ready(output,False)
-                        except JobError:
+                        except JobError as exc:
                             self.log('invalid_job','WARNING',output_id=output)
                             slot.state='invalid_job';slot.latest=None;self.scheduler.set_ready(output,False)
                 try: await asyncio.wait_for(context.wake.wait(),self.snapshot.quantum_seconds)
@@ -396,16 +398,16 @@ class RouterRuntime:
             route=self.jobs.route_submit(context.connection_id,params,context.version_mask)
             slot=self.outputs.get(route.output_id)
             session=slot.session if slot else None
-            if not session or session.closed or session.generation!=route.generation: raise JobError('Stale mining job')
+            if not session or session.closed or session.generation!=route.generation: raise JobError('Stale mining job','output_session_stale')
             upstream=list(route.request_params);upstream[0]=session.endpoint.username
             if session.version_mask is not None:
                 down=context.version_mask or 0
-                if down & ~session.version_mask: raise JobError('Output version mask changed')
+                if down & ~session.version_mask: raise JobError('Output version mask changed','output_version_mask_changed')
                 bits=int(upstream[5],16) if len(upstream)==6 else 0
                 bits |= int(route.job.version,16) & session.version_mask & ~down
                 upstream=upstream[:5]+[format(bits,'08x')]
             elif context.version_mask is not None:
-                raise JobError('Output does not support version rolling')
+                raise JobError('Output does not support version rolling','output_version_unsupported')
             try:
                 context.diagnostics['forward_attempts']+=1
                 if context.diagnostics['forward_attempts']<=3:
@@ -429,11 +431,13 @@ class RouterRuntime:
                     if live and live.source:
                         self.scheduler.set_connection_capacity(connection,live.source.source_id,rate)
             await self._reply(context,request_id,accepted is True,None if accepted is True else [20,'Share rejected',None])
-        except JobError:
+        except JobError as exc:
             context.diagnostics['local_rejected']+=1
-            if context.diagnostics['local_rejected']<=3:
-                self.log('input_submit_rejected',connection=context.connection_id,reason='invalid_or_stale_share',
-                         count=context.diagnostics['local_rejected'])
+            count=context.rejection_counts.get(exc.reason,0)+1
+            context.rejection_counts[exc.reason]=count
+            if count<=3:
+                self.log('input_submit_rejected',connection=context.connection_id,reason=exc.reason,
+                         count=count,**self.jobs.submit_diagnostic(context.connection_id,params,context.version_mask))
             self.log('share_stale','DEBUG',connection=context.connection_id)
             await self._reply(context,request_id,False,[21,'Unknown or stale job',None])
         except (ConnectionError,OSError,TimeoutError) as exc:

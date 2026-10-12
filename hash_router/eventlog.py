@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LEVELS={'DEBUG':10,'INFO':20,'WARNING':30,'ERROR':40}
-FIELDS={'phase','subscribed','authorized','algorithm','connection','source_id','output_id','revision','sources','outputs',
+FIELDS={'parameter_count','expected_parameter_count','extranonce2_chars','ntime_chars','nonce_chars','version_chars',
+        'job_known','job_valid','job_owned','job_age_ms','expected_extranonce2_chars','upstream_extranonce2_bytes','invalidation_reason','phase','subscribed','authorized','algorithm','connection','source_id','output_id','revision','sources','outputs',
         'port','host','reason','error_type','duration_ms','difficulty','accepted','rejected',
         'stale','target_gh','allocated_gh','shortage_gh','connections','retry_seconds','method',
         'status','count','level','nominal_gh','live_gh','reserve_gh','usable_gh','minimum_gh','extensions','mask',

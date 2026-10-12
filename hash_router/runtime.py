@@ -204,42 +204,68 @@ class RouterRuntime:
             writer.close();self.client_tasks.discard(task);return
         self.clients[context.connection_id]=context
         self.log('input_connected',connection=context.connection_id)
+        started=self.clock();phase='await_request';last_method='none';reason='service_stopped'
+        handshake_methods={'mining.subscribe','mining.configure','mining.authorize',
+                           'mining.extranonce.subscribe','client.get_version','mining.suggest_difficulty'}
+        handshake_count=0
+        async def reply(request_id,result,error=None):
+            nonlocal phase
+            phase='send_reply'
+            await self._reply(context,request_id,result,error)
+            if last_method in handshake_methods and handshake_count<=32:
+                self.log('input_handshake_reply',connection=context.connection_id,method=last_method,
+                         status='error' if error else ('denied' if result is False else 'ok'),
+                         duration_ms=round((self.clock()-request_started)*1000))
+            phase='await_request'
         try:
             while self.running:
                 request=await read_message(reader,timeout=600 if context.source else 15)
                 method=request.get('method');params=request.get('params');request_id=request.get('id')
+                request_started=self.clock();phase='handle_request'
+                last_method=method if isinstance(method,str) and method in handshake_methods else 'other'
+                if not context.source or last_method in handshake_methods:
+                    handshake_count+=1
+                    if handshake_count<=32:
+                        self.log('input_handshake_request',connection=context.connection_id,method=last_method,
+                                 phase='subscribed' if context.subscribed else 'not_subscribed')
                 if not isinstance(params,list) or not isinstance(request_id,(int,str)) or isinstance(request_id,bool):
                     raise ProtocolError('Invalid Stratum request')
                 if method=='mining.subscribe':
                     if context.subscribed: raise ProtocolError('Already subscribed')
                     context.subscribed=True
-                    await self._reply(context,request_id,[[['mining.notify',context.connection_id]],'00',2])
+                    await reply(request_id,[[['mining.notify',context.connection_id]],'00',2])
                 elif method=='mining.authorize':
                     source=None
                     if self.snapshot and context.subscribed and len(params)==2 and all(isinstance(p,str) for p in params):
                         source=next((s for s in self.snapshot.sources if s.username==params[0] and s.expires_at>self.wall_clock()
                                      and hmac.compare_digest(s.password.encode(),params[1].encode())),None)
                     if context.source is not None: source=None
-                    await self._reply(context,request_id,source is not None)
+                    await reply(request_id,source is not None)
                     self.log('input_authorized' if source else 'input_authorization_failed','INFO' if source else 'WARNING',
                              connection=context.connection_id,source_id=source.source_id if source else None)
-                    if source is None: break
+                    if source is None:
+                        reason='authorization_denied';break
                     context.source=source;self.scheduler.set_connection_capacity(context.connection_id,source.source_id,Decimal(0))
                     context.sender=asyncio.create_task(self._sender_loop(context))
                 elif method=='mining.submit' and context.source:
                     if len(context.submits)>=32:
-                        await self._reply(context,request_id,False,[20,'Too many pending shares',None]);continue
+                        await reply(request_id,False,[20,'Too many pending shares',None]);continue
                     submit=asyncio.create_task(self._submit(context,request_id,params))
                     context.submits.add(submit);submit.add_done_callback(context.submits.discard)
-                elif method=='mining.extranonce.subscribe': await self._reply(context,request_id,True)
+                elif method=='mining.extranonce.subscribe': await reply(request_id,True)
                 elif method=='mining.configure':
                     extensions=params[0] if params and isinstance(params[0],list) else []
-                    await self._reply(context,request_id,{extension:False for extension in extensions if isinstance(extension,str)})
-                elif method=='client.get_version': await self._reply(context,request_id,'scrypt-hash-router/0.1')
-                elif method=='mining.suggest_difficulty': await self._reply(context,request_id,False)
-                else: await self._reply(context,request_id,False,[20,'Unsupported method',None])
+                    await reply(request_id,{extension:False for extension in extensions if isinstance(extension,str)})
+                elif method=='client.get_version': await reply(request_id,'scrypt-hash-router/0.1')
+                elif method=='mining.suggest_difficulty': await reply(request_id,False)
+                else: await reply(request_id,False,[20,'Unsupported method',None])
         except (ConnectionError,OSError,TimeoutError,ValueError) as exc:
-            self.log('input_error','WARNING',connection=context.connection_id,error_type=type(exc).__name__)
+            reason=('timeout' if isinstance(exc,TimeoutError) else 'protocol_error' if isinstance(exc,ValueError)
+                    else 'connection_closed' if isinstance(exc,ConnectionError) else 'transport_error')
+            self.log('input_error','WARNING',connection=context.connection_id,error_type=type(exc).__name__,
+                     reason=reason,phase=phase,method=last_method)
+        except asyncio.CancelledError:
+            reason='service_stopped';raise
         finally:
             if context.sender: context.sender.cancel();await asyncio.gather(context.sender,return_exceptions=True)
             for submit in tuple(context.submits): submit.cancel()
@@ -247,7 +273,9 @@ class RouterRuntime:
             if self.scheduler: self.scheduler.remove_connection(context.connection_id)
             self.clients.pop(context.connection_id,None);self.client_tasks.discard(task)
             self._allocation_state.pop(context.connection_id,None)
-            self.log('input_disconnected',connection=context.connection_id)
+            self.log('input_disconnected',connection=context.connection_id,reason=reason,phase=phase,
+                     method=last_method,subscribed=context.subscribed,authorized=context.source is not None,
+                     duration_ms=round((self.clock()-started)*1000))
             writer.close()
             try: await writer.wait_closed()
             except (ConnectionError,OSError): pass

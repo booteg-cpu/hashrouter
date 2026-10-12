@@ -1,3 +1,3 @@
 """Experimental Scrypt routing service; importing never opens a connection."""
 
-__version__ = '82.0.19'
+__version__ = '82.0.21'

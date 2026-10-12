@@ -11,27 +11,39 @@ from .state import AtomicState
 from .runtime import RouterRuntime
 from .metrics import Metrics,DifficultyConvention
 from .multi import MultiRouter,create_multi_app
+from .eventlog import EventLog
 
 
 async def serve(config):
     ssl_context=tls_context(config)
+    journal=EventLog(Path(config['state_path']).with_name('router-events.jsonl'),level=config.get('log_level','INFO'),async_write=True)
     conventions=dict(config.get('algorithm_difficulty_conventions',{}))
     conventions.setdefault('scrypt',config.get('difficulty_convention',{}))
     runtime=MultiRouter(AtomicState(Path(config['state_path'])),config['stratum_host'],
-                       config['stratum_port'],config['control_port'],config['max_connections'],conventions)
+                       config['stratum_port'],config['control_port'],config['max_connections'],conventions,event_log=journal)
     runner=web.AppRunner(create_multi_app(runtime,config['api_token']),access_log=None)
     stopped=asyncio.Event()
     loop=asyncio.get_running_loop()
     for sig in (signal.SIGTERM,signal.SIGINT):
         try: loop.add_signal_handler(sig,stopped.set)
         except (NotImplementedError,RuntimeError): pass
+    async def summaries():
+        while True:
+            runtime.status()
+            await asyncio.sleep(30)
+    monitor=None
     try:
         await runtime.start(config['stratum_host'],config['stratum_port'])
         await runner.setup()
         await web.TCPSite(runner,config['control_host'],config['control_port'],ssl_context=ssl_context).start()
+        journal.emit('service_started',revision=__version__,port=config['control_port'])
+        monitor=asyncio.create_task(summaries())
         await stopped.wait()
     finally:
+        if monitor:
+            monitor.cancel();await asyncio.gather(monitor,return_exceptions=True)
         await runner.cleanup();await runtime.stop()
+        journal.emit('service_stopped');journal.close()
 
 
 def main(argv=None):

@@ -23,11 +23,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         pools=[FakePool('01'),FakePool('02'),FakePool('03')]
         async with fake_server(pools[0].handler) as a,fake_server(pools[1].handler) as b,fake_server(pools[2].handler) as c:
             rt,endpoint=await self.run_setup(a,b,c)
+            rt.event_log.set_level('DEBUG')
             _,coinbases=await mining_client(endpoint,jobs=12)
             received=[coinbase for pool in pools for _,coinbase in pool.shares]
             self.assertCountEqual(coinbases,received)
             self.assertTrue(all(pool.shares for pool in pools))
             self.assertEqual(12,sum(row['accepted'] for row in rt.status().to_dict()['outputs']))
+            entries=rt.event_log.read()['entries']
+            self.assertEqual(12,sum(row['event']=='share_accepted' for row in entries))
+            self.assertIn('input_authorized',[row['event'] for row in entries])
+            self.assertIn('output_ready',[row['event'] for row in entries])
+            self.assertNotIn('password',__import__('json').dumps(entries))
             await rt.stop()
     async def test_client_reconnect_changes_output_session(self):
         pool=FakePool('01');new=FakePool('02');remainder=FakePool('03')

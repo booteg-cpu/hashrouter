@@ -9,6 +9,7 @@ from .models import RouterSnapshot, integer
 from .runtime import RouterRuntime
 from .metrics import Metrics, DifficultyConvention
 from .control import create_control_app
+from .eventlog import EventLog
 
 KNOWN_PROTOCOLS = {'scrypt':'bitcoin-stratum-v1','sha256ab':'bitcoin-stratum-v1',
                    'sha256':'bitcoin-stratum-v1','sha256d':'bitcoin-stratum-v1'}
@@ -56,7 +57,8 @@ class MultiStatus:
     def to_dict(self):return self.data
 
 class MultiRouter:
-    def __init__(self,state,host,base_port,control_port,max_connections=128,conventions=None):
+    def __init__(self,state,host,base_port,control_port,max_connections=128,conventions=None,event_log=None):
+        self.event_log=event_log or EventLog()
         self.state=state;self.host=host;self.base_port=base_port;self.control_port=control_port
         self.max_connections=max_connections;self.conventions=conventions or {}
         self.running=False;self.lock=asyncio.Lock();self.groups={}
@@ -85,7 +87,7 @@ class MultiRouter:
     def make_group(self,code,state):
         # A verified Scrypt scale is never inherited by another algorithm.
         convention=DifficultyConvention(**self.conventions.get(code,{'name':code+'-unverified'}))
-        return RouterRuntime(state,max_connections=self.max_connections,metrics=Metrics(convention=convention))
+        return RouterRuntime(state,max_connections=self.max_connections,metrics=Metrics(convention=convention),event_log=self.event_log,algorithm=code)
 
     def persist(self,*,catalog=None,ports=None,saved=None):
         self.state.save({'schema_version':2,'catalog':self.catalog if catalog is None else catalog,
@@ -110,6 +112,7 @@ class MultiRouter:
             if len(catalog)>100:raise ValueError('Too many retained algorithms')
             self.persist(catalog=catalog,ports=ports)
             self.catalog=catalog;self.ports=ports
+            self.event_log.emit('catalog_applied',count=len(desired))
 
     async def apply_group(self,code,snapshot):
         algorithm_code(code)

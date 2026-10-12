@@ -1,6 +1,7 @@
 """Live TCP routing with separate upstream ownership and bounded downstream work."""
 import asyncio
 import hmac
+import json
 import time
 import uuid
 from dataclasses import dataclass,field,replace
@@ -321,7 +322,7 @@ class RouterRuntime:
             except (ConnectionError,OSError): pass
 
     async def _sender_loop(self,context):
-        last=None;started=self.clock()
+        last=None;started=self.clock();issued=None;issued_id=None;sent_difficulty=None
         try:
             while self.running:
                 if last is not None:
@@ -352,14 +353,22 @@ class RouterRuntime:
                                 if mask!=context.version_mask:
                                     await self._send(context,{'id':None,'method':'mining.set_version_mask','params':[format(mask,'08x')]})
                                     context.version_mask=mask
-                            job=self.jobs.publish(context.connection_id,output,slot.session.generation,
-                                slot.latest,slot.difficulty,slot.session.extranonce1,slot.session.extranonce2_size,'00',2)
-                            await self._send(context,{'id':None,'method':'mining.set_difficulty','params':[float(slot.difficulty)]})
-                            await self._send(context,{'id':None,'method':'mining.notify','params':job})
-                            context.diagnostics['jobs_sent']+=1;context.last_job_at=self.clock()
-                            if context.diagnostics['jobs_sent']<=3:
-                                self.log('input_work_sent',connection=context.connection_id,output_id=output,
-                                         count=context.diagnostics['jobs_sent'],difficulty=str(slot.difficulty))
+                            signature=(output,slot.session.generation,json.dumps(slot.latest,separators=(',',':')),
+                                slot.difficulty,slot.session.extranonce1,slot.session.extranonce2_size,
+                                slot.session.version_mask,context.version_mask)
+                            previous=self.jobs.jobs.get(issued_id)
+                            if signature!=issued or previous is None or not previous.valid:
+                                job=self.jobs.publish(context.connection_id,output,slot.session.generation,
+                                    slot.latest,slot.difficulty,slot.session.extranonce1,slot.session.extranonce2_size,'00',2)
+                                if sent_difficulty!=slot.difficulty:
+                                    await self._send(context,{'id':None,'method':'mining.set_difficulty','params':[float(slot.difficulty)]})
+                                    sent_difficulty=slot.difficulty
+                                await self._send(context,{'id':None,'method':'mining.notify','params':job})
+                                issued=signature;issued_id=job[0]
+                                context.diagnostics['jobs_sent']+=1;context.last_job_at=self.clock()
+                                if context.diagnostics['jobs_sent']<=3:
+                                    self.log('input_work_sent',connection=context.connection_id,output_id=output,
+                                             count=context.diagnostics['jobs_sent'],difficulty=str(slot.difficulty))
                             last=output;started=self.clock()
                         except IncompatibleExtranonce:
                             self.log('output_incompatible','WARNING',output_id=output,reason='extranonce')

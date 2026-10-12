@@ -55,16 +55,22 @@ async def mining_client(endpoint,username='input',password='password',jobs=3):
         await write_message(writer,{'id':1,'method':'mining.authorize','params':[username,password]})
         auth=await read_message(reader)
         if not auth.get('result'): return auth,coinbases
+        job=None
         for i in range(jobs):
+            # A miner can submit multiple shares for one unchanged job.
             while True:
-                message=await read_message(reader,timeout=3)
-                if message.get('method')=='mining.notify': break
-            job=message['params'];extra2=f'{i:0{size*2}x}'
+                try: message=await read_message(reader,timeout=3 if job is None else .03)
+                except TimeoutError: break
+                if message.get('method')=='mining.notify':
+                    job=message['params'];break
+            if job is None: raise AssertionError('No initial mining job')
+            extra2=f'{i:0{size*2}x}'
             coinbases.append(job[2]+extra1+extra2+job[3])
             await write_message(writer,{'id':i+2,'method':'mining.submit',
                 'params':[username,job[0],extra2,job[7],'aabbccdd']})
             while True:
                 reply=await read_message(reader,timeout=3)
+                if reply.get('method')=='mining.notify': job=reply['params']
                 if reply.get('id')==i+2:
                     if not reply.get('result'): raise AssertionError(reply)
                     break

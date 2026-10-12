@@ -52,6 +52,12 @@ class VersionRollingTests(unittest.IsolatedAsyncioTestCase):
                             msg=await read_message(reader,timeout=3)
                             if msg.get('method')=='mining.notify': break
                         job=msg['params']
+                        rt._summary_at=rt.clock()-31;rt.status()
+                        flow=[r for r in rt.event_log.read()['entries'] if r['event']=='input_flow_summary'][-1]
+                        self.assertGreater(flow['jobs_sent'],0)
+                        self.assertEqual(0,flow['submits_received'])
+                        self.assertNotIn('last_submit_age_ms',flow)
+                        self.assertGreaterEqual(flow['last_job_age_ms'],0)
                         params=['input',job[0],'0011',job[7],'aabbccdd']+(['00000000'] if rolling else [])
                         await write_message(writer,{'id':3,'method':'mining.submit','params':params})
                         while True:

@@ -38,6 +38,10 @@ class InputConnection:
     submits: set = field(default_factory=set)
     miner_mask: int | None = None
     version_mask: int | None = None
+    diagnostics: dict = field(default_factory=lambda:dict(jobs_sent=0,submits_received=0,
+        forward_attempts=0,accepted=0,rejected=0,local_rejected=0,outcome_unknown=0))
+    last_job_at: float | None = None
+    last_submit_at: float | None = None
 
 
 class RouterRuntime:
@@ -304,6 +308,8 @@ class RouterRuntime:
             if context.sender: context.sender.cancel();await asyncio.gather(context.sender,return_exceptions=True)
             for submit in tuple(context.submits): submit.cancel()
             await asyncio.gather(*context.submits,return_exceptions=True)
+            if context.source is not None:
+                self.log('input_flow_summary',connection=context.connection_id,**context.diagnostics,status='disconnected')
             if self.scheduler: self.scheduler.remove_connection(context.connection_id)
             self.clients.pop(context.connection_id,None);self.client_tasks.discard(task)
             self._allocation_state.pop(context.connection_id,None)
@@ -350,6 +356,10 @@ class RouterRuntime:
                                 slot.latest,slot.difficulty,slot.session.extranonce1,slot.session.extranonce2_size,'00',2)
                             await self._send(context,{'id':None,'method':'mining.set_difficulty','params':[float(slot.difficulty)]})
                             await self._send(context,{'id':None,'method':'mining.notify','params':job})
+                            context.diagnostics['jobs_sent']+=1;context.last_job_at=self.clock()
+                            if context.diagnostics['jobs_sent']<=3:
+                                self.log('input_work_sent',connection=context.connection_id,output_id=output,
+                                         count=context.diagnostics['jobs_sent'],difficulty=str(slot.difficulty))
                             last=output;started=self.clock()
                         except IncompatibleExtranonce:
                             self.log('output_incompatible','WARNING',output_id=output,reason='extranonce')
@@ -370,6 +380,9 @@ class RouterRuntime:
 
     async def _submit(self,context,request_id,params):
         started=self.clock()
+        context.diagnostics['submits_received']+=1;context.last_submit_at=started
+        if context.diagnostics['submits_received']<=3:
+            self.log('input_submit_received',connection=context.connection_id,count=context.diagnostics['submits_received'])
         try:
             route=self.jobs.route_submit(context.connection_id,params,context.version_mask)
             slot=self.outputs.get(route.output_id)
@@ -385,10 +398,19 @@ class RouterRuntime:
             elif context.version_mask is not None:
                 raise JobError('Output does not support version rolling')
             try:
+                context.diagnostics['forward_attempts']+=1
+                if context.diagnostics['forward_attempts']<=3:
+                    self.log('share_forward_attempt',connection=context.connection_id,output_id=route.output_id,
+                             count=context.diagnostics['forward_attempts'])
                 accepted=await session.request('mining.submit',upstream)
             except RemoteError:
                 accepted=False
             self.metrics.record_submit(route,accepted is True)
+            outcome='accepted' if accepted is True else 'rejected'
+            context.diagnostics[outcome]+=1
+            if context.diagnostics[outcome]<=3:
+                self.log('upstream_share_result',connection=context.connection_id,output_id=route.output_id,
+                         status=outcome,count=context.diagnostics[outcome],duration_ms=round((self.clock()-started)*1000))
             self.log('share_accepted' if accepted is True else 'share_rejected','DEBUG',
                      connection=context.connection_id,output_id=route.output_id,duration_ms=round((self.clock()-started)*1000))
             if accepted is True:
@@ -399,9 +421,14 @@ class RouterRuntime:
                         self.scheduler.set_connection_capacity(connection,live.source.source_id,rate)
             await self._reply(context,request_id,accepted is True,None if accepted is True else [20,'Share rejected',None])
         except JobError:
+            context.diagnostics['local_rejected']+=1
+            if context.diagnostics['local_rejected']<=3:
+                self.log('input_submit_rejected',connection=context.connection_id,reason='invalid_or_stale_share',
+                         count=context.diagnostics['local_rejected'])
             self.log('share_stale','DEBUG',connection=context.connection_id)
             await self._reply(context,request_id,False,[21,'Unknown or stale job',None])
         except (ConnectionError,OSError,TimeoutError) as exc:
+            context.diagnostics['outcome_unknown']+=1
             self.log('share_outcome_unknown','WARNING',connection=context.connection_id,error_type=type(exc).__name__)
             try: await self._reply(context,request_id,False,[20,'Upstream outcome unknown',None])
             except (ConnectionError,OSError,TimeoutError): pass
@@ -418,10 +445,18 @@ class RouterRuntime:
             row['allocated_target_gh']=format(weights.get(row['output_id'],Decimal(0)),'f')
         if self.clock()-self._summary_at>=30:
             self._summary_at=self.clock()
+            for context in self.clients.values():
+                if context.source is None: continue
+                ages={}
+                if context.last_job_at is not None: ages['last_job_age_ms']=round((self.clock()-context.last_job_at)*1000)
+                if context.last_submit_at is not None: ages['last_submit_age_ms']=round((self.clock()-context.last_submit_at)*1000)
+                self.log('input_flow_summary',connection=context.connection_id,**context.diagnostics,**ages,
+                         status='sender_running' if context.sender and not context.sender.done() else 'sender_stopped')
             for row in result.outputs:
                 self.log('output_summary',output_id=row['output_id'],status=row['state'],
                          accepted=row.get('accepted',0),rejected=row.get('rejected',0),stale=row.get('stale',0),
                          target_gh=row['target_gh'],allocated_gh=row['allocated_target_gh'],
+                         difficulty=str(slot.difficulty) if (slot:=self.outputs.get(row['output_id'])) else 'unknown',
                          shortage_gh=str(max(Decimal(0),Decimal(row['target_gh'])-weights.get(row['output_id'],Decimal(0)))),
                          connections=len(self.clients))
         shortages={o.output_id:format(max(Decimal(0),o.target_gh-weights.get(o.output_id,Decimal(0))),'f') for o in self.snapshot.outputs}

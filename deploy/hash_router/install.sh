@@ -8,7 +8,7 @@ if [[ ${ID:-} != debian ]]; then echo 'This installer targets Debian.' >&2; exit
 systemctl stop hash-router 2>/dev/null || true
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 apt-get update
-apt-get install -y python3 python3-venv ca-certificates openssl
+apt-get install -y python3 python3-venv ca-certificates openssl iproute2
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python >=3.11 required"'
 if ! id hash-router >/dev/null 2>&1; then
   useradd --system --home-dir /var/lib/hash-router --shell /usr/sbin/nologin hash-router
@@ -34,9 +34,15 @@ chown root:hash-router /etc/hash-router/config.json
 chmod 0640 /etc/hash-router/config.json
 install -o root -g root -m 0644 "$PROJECT_DIR/deploy/hash_router/hash-router.service" /etc/systemd/system/hash-router.service
 systemctl daemon-reload
-read -r -p 'Public VPS IP or DNS name: ' PUBLIC_ROUTER_HOST
-read -r -p 'HTTPS API port [8443]: ' ROUTER_API_PORT
-ROUTER_API_PORT="${ROUTER_API_PORT:-8443}"
+ROUTER_DEFAULTS=$(python3 "$PROJECT_DIR/deploy/hash_router/setup_connection.py" --defaults)
+ROUTER_DEFAULT_HOST=$(printf '%s\n' "$ROUTER_DEFAULTS" | head -n 1)
+ROUTER_DEFAULT_PORT=$(printf '%s\n' "$ROUTER_DEFAULTS" | tail -n 1)
+echo 'Confirm the public VPS address below; enter a different IP/domain if needed (for example behind NAT).'
+read -r -p "Public VPS IP or DNS name [$ROUTER_DEFAULT_HOST]: " PUBLIC_ROUTER_HOST
+PUBLIC_ROUTER_HOST="${PUBLIC_ROUTER_HOST:-$ROUTER_DEFAULT_HOST}"
+if [[ -z "$PUBLIC_ROUTER_HOST" ]]; then echo 'Public IP not detected; enter the VPS public IP or DNS name.' >&2; exit 1; fi
+read -r -p "HTTPS API port [$ROUTER_DEFAULT_PORT]: " ROUTER_API_PORT
+ROUTER_API_PORT="${ROUTER_API_PORT:-$ROUTER_DEFAULT_PORT}"
 python3 "$PROJECT_DIR/deploy/hash_router/setup_connection.py" --host "$PUBLIC_ROUTER_HOST" --port "$ROUTER_API_PORT" --quiet
 python3 - <<'PY'
 import grp,json,os

@@ -13,6 +13,38 @@ import tempfile
 from pathlib import Path
 
 
+def connection_defaults(path='/etc/hash-router/config.json',env=None):
+    """Read existing public settings or inspect local routes; no external probes."""
+    config=json.loads(Path(path).read_text()) if Path(path).exists() else {}
+    if not isinstance(config,dict):raise ValueError('Invalid saved configuration')
+    saved=config.get('public_host')
+    port=config.get('control_port',8443)
+    if type(port) is not int or not 1<=port<=65535 or 3333<=port<=3433:
+        raise ValueError('Invalid saved API port')
+    if saved:
+        if not isinstance(saved,str):raise ValueError('Invalid saved public host')
+        return host_name(saved),port
+    environment=os.environ if env is None else env
+    ssh=environment.get('SSH_CONNECTION','').split()
+    candidates=[ssh[2]] if len(ssh)==4 else []
+    try:
+        result=subprocess.run(['ip','-j','route','get','1.1.1.1'],capture_output=True,text=True,check=True,timeout=3)
+        candidates.extend(r.get('prefsrc','') for r in json.loads(result.stdout))
+    except (OSError,ValueError,subprocess.SubprocessError,AttributeError,TypeError):pass
+    for value in candidates:
+        try:
+            address=ipaddress.ip_address(value)
+            if address.is_global:return str(address),port
+        except ValueError:pass
+    try:
+        result=subprocess.run(['ip','-j','address','show','scope','global'],capture_output=True,text=True,check=True,timeout=3)
+        addresses={str(ipaddress.ip_address(a['local'])) for row in json.loads(result.stdout)
+                   for a in row.get('addr_info',[]) if ipaddress.ip_address(a['local']).is_global}
+        if len(addresses)==1:return addresses.pop(),port
+    except (OSError,ValueError,KeyError,subprocess.SubprocessError,AttributeError,TypeError):pass
+    return '',port
+
+
 def host_name(value):
     value=value.strip()
     try:return str(ipaddress.ip_address(value))
@@ -116,12 +148,18 @@ def show_connection(bundle,config,fingerprint,*,export_connection=False):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--host',required=True)
+    parser=argparse.ArgumentParser();parser.add_argument('--host')
+    parser.add_argument('--defaults',action='store_true',help='Print public host and API port defaults only')
     parser.add_argument('--port',type=int,default=8443)
     parser.add_argument('--export-connection',action='store_true',
                         help='Also write the optional legacy SBP import file')
     parser.add_argument('--quiet',action='store_true',help='Do not print connection credentials')
     args=parser.parse_args()
+    if args.defaults:
+        try:host,port=connection_defaults()
+        except (ValueError,OSError):parser.exit(2,'Cannot read saved connection settings.\n')
+        print(host);print(port);return
+    if not args.host:parser.error('--host is required unless --defaults is used')
     try:
         bundle,config=initialize('/etc/hash-router','/var/lib/hash-router',args.host,args.port,
                                  export_connection=args.export_connection)

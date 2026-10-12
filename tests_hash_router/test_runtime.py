@@ -34,8 +34,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('input_authorized',[row['event'] for row in entries])
             self.assertTrue(any(row['event']=='input_handshake_reply' and row['method']=='mining.authorize' and row['status']=='ok' for row in entries))
             self.assertIn('output_ready',[row['event'] for row in entries])
+            for event in ('input_work_sent','input_submit_received','share_forward_attempt','upstream_share_result'):
+                self.assertEqual(3,sum(row['event']==event for row in entries))
             self.assertNotIn('password',__import__('json').dumps(entries))
             await rt.stop()
+            flow=[r for r in rt.event_log.read()['entries'] if r['event']=='input_flow_summary']
+            self.assertTrue(any(r['submits_received']==12 and r['accepted']==12 and r['forward_attempts']==12 for r in flow))
             self.assertTrue(any(row['event']=='input_disconnected' and row['authorized'] is True for row in rt.event_log.read()['entries']))
     async def test_client_reconnect_changes_output_session(self):
         pool=FakePool('01');new=FakePool('02');remainder=FakePool('03')

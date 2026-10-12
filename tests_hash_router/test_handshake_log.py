@@ -2,11 +2,25 @@ import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
-from hash_router.runtime import RouterRuntime
+from hash_router.runtime import RouterRuntime,InputConnection
 from hash_router.multi import MemoryState
 
 
 class HandshakeLogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submit_diagnostics_distinguish_local_rejection_and_hide_payload(self):
+        rt=RouterRuntime(MemoryState(),algorithm='sha256ab')
+        context=InputConnection('test',None,None)
+        rt._reply=AsyncMock()
+        for i in range(20):
+            await rt._submit(context,i,['private-worker','private-job','private-nonce'])
+        self.assertEqual(20,context.diagnostics['submits_received'])
+        self.assertEqual(20,context.diagnostics['local_rejected'])
+        self.assertEqual(0,context.diagnostics['forward_attempts'])
+        rows=rt.event_log.read()['entries']
+        self.assertEqual(3,sum(r['event']=='input_submit_received' for r in rows))
+        self.assertEqual(3,sum(r['event']=='input_submit_rejected' for r in rows))
+        self.assertNotIn('private-',json.dumps(rows))
+
     async def run_client(self, requests=(), raw=None, failure=None):
         rt=RouterRuntime(MemoryState(),algorithm='sha256ab');rt.running=True
         reader=asyncio.StreamReader()

@@ -1,5 +1,5 @@
 #!/bin/sh
-# GitHub entry point, installer revision 82.0.19. Run with: sudo bash install-router.sh
+# GitHub entry point, installer revision 82.0.24. Run with: sudo bash install-router.sh
 set -eu
 case "$0" in
     */*) SCRIPT_PARENT=${0%/*} ;;
@@ -23,7 +23,7 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 case "${1:-}" in
-    --check) echo 'Hash Router installer 82.0.19: package complete.'; exit 0 ;;
+    --check) echo 'Hash Router installer 82.0.24: package complete.'; exit 0 ;;
     '') ;;
     *) echo 'Usage: sudo bash install-router.sh [--check]' >&2; exit 2 ;;
 esac

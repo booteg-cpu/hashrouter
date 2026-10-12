@@ -13,6 +13,29 @@ from hash_router.__main__ import main as router_main
 
 
 class ConnectionSetupTests(unittest.TestCase):
+    def test_defaults_preserve_saved_host_and_custom_port_without_network(self):
+        with patch.object(setup.subprocess,'run') as run:
+            self.config.update(public_host='router.example',control_port=9443)
+            (self.root/'config.json').write_text(json.dumps(self.config))
+            self.assertEqual(('router.example',9443),setup.connection_defaults(self.root/'config.json'))
+            run.assert_not_called()
+
+    def test_defaults_detect_ssh_server_address_and_not_client_address(self):
+        with patch.object(setup.subprocess,'run',side_effect=OSError):
+            self.assertEqual(('8.8.8.8',8443),setup.connection_defaults(self.root/'absent.json',
+                {'SSH_CONNECTION':'9.9.9.9 1234 8.8.8.8 22'}))
+
+    def test_defaults_do_not_guess_private_or_ambiguous_addresses(self):
+        from types import SimpleNamespace
+        with patch.object(setup.subprocess,'run',side_effect=[SimpleNamespace(stdout='[{"prefsrc":"10.0.0.1"}]'),
+                SimpleNamespace(stdout='[{"addr_info":[{"local":"8.8.8.8"},{"local":"9.9.9.9"}]}]')]):
+            self.assertEqual(('',8443),setup.connection_defaults(self.root/'absent.json',{}))
+
+    def test_defaults_detect_public_route(self):
+        from types import SimpleNamespace
+        with patch.object(setup.subprocess,'run',return_value=SimpleNamespace(stdout='[{"prefsrc":"8.8.8.8"}]')):
+            self.assertEqual(('8.8.8.8',8443),setup.connection_defaults(self.root/'absent.json',{}))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -88,4 +111,4 @@ class ConnectionSetupTests(unittest.TestCase):
         with redirect_stdout(output), self.assertRaises(SystemExit) as result:
             router_main(['--version'])
         self.assertEqual(0, result.exception.code)
-        self.assertEqual('Hash Router 82.0.23', output.getvalue().strip())
+        self.assertEqual('Hash Router 82.0.24', output.getvalue().strip())

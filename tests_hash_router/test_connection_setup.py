@@ -111,4 +111,4 @@ class ConnectionSetupTests(unittest.TestCase):
         with redirect_stdout(output), self.assertRaises(SystemExit) as result:
             router_main(['--version'])
         self.assertEqual(0, result.exception.code)
-        self.assertEqual('Hash Router 82.0.26', output.getvalue().strip())
+        self.assertEqual('Hash Router 82.0.27', output.getvalue().strip())

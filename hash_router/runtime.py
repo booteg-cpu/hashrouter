@@ -42,6 +42,7 @@ class InputConnection:
     diagnostics: dict = field(default_factory=lambda:dict(jobs_sent=0,submits_received=0,
         forward_attempts=0,accepted=0,rejected=0,local_rejected=0,outcome_unknown=0))
     rejection_counts: dict = field(default_factory=dict)
+    idle_waits: int = 0
     last_job_at: float | None = None
     last_submit_at: float | None = None
 
@@ -214,6 +215,24 @@ class RouterRuntime:
     async def _reply(self,context,request_id,result,error=None):
         await self._send(context,{'id':request_id,'result':result,'error':error})
 
+    async def _read_input(self,context):
+        # An authenticated Stratum client need not send commands while hashing.
+        # Idle observations must not force a reconnect of an otherwise live lease.
+        while self.running:
+            try:
+                message=await read_message(context.reader,timeout=600 if context.source else 15)
+                context.idle_waits=0
+                return message
+            except TimeoutError:
+                if context.source is None or context.source.expires_at<=self.wall_clock():
+                    raise
+                context.idle_waits+=1
+                self.log('input_idle',connection=context.connection_id,status='waiting_for_input',
+                         duration_ms=600000,count=context.idle_waits,
+                         jobs_sent=context.diagnostics['jobs_sent'],
+                         submits_received=context.diagnostics['submits_received'])
+        raise ConnectionError('Router stopped')
+
     async def _handle_client(self,reader,writer):
         task=asyncio.current_task();self.client_tasks.add(task)
         context=InputConnection(uuid.uuid4().hex,reader,writer)
@@ -237,7 +256,7 @@ class RouterRuntime:
             phase='await_request'
         try:
             while self.running:
-                request=await read_message(reader,timeout=600 if context.source else 15)
+                request=await self._read_input(context)
                 method=request.get('method');params=request.get('params');request_id=request.get('id')
                 request_started=self.clock();phase='handle_request'
                 last_method=method if isinstance(method,str) and method in handshake_methods else 'other'

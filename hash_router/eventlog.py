@@ -12,7 +12,7 @@ LEVELS={'DEBUG':10,'INFO':20,'WARNING':30,'ERROR':40}
 FIELDS={'phase','subscribed','authorized','algorithm','connection','source_id','output_id','revision','sources','outputs',
         'port','host','reason','error_type','duration_ms','difficulty','accepted','rejected',
         'stale','target_gh','allocated_gh','shortage_gh','connections','retry_seconds','method',
-        'status','count','level','nominal_gh','live_gh','reserve_gh','usable_gh','minimum_gh','extensions'}
+        'status','count','level','nominal_gh','live_gh','reserve_gh','usable_gh','minimum_gh','extensions','mask'}
 
 
 class EventLog:

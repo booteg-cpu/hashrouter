@@ -40,6 +40,7 @@ class JobRecord:
     valid: bool
     created_at: float
     ntime: str
+    version: str
 
 
 @dataclass(frozen=True,slots=True)
@@ -98,15 +99,15 @@ class JobBook:
         local_id=uuid.uuid4().hex
         layout=ExtranonceLayout(unique+downstream_nonce,downstream_nonce,downstream_extranonce2_size,upstream_extranonce2_size)
         record=JobRecord(local_id,source_connection_id,output_id,generation,notify[0],
-                         number(difficulty,'difficulty',positive=True),layout,True,self.clock(),notify[7])
+                         number(difficulty,'difficulty',positive=True),layout,True,self.clock(),notify[7],notify[5])
         self.jobs[local_id]=record;self._collect()
         result=list(notify);result[0]=local_id;result[2]=notify[2]+upstream_nonce+unique
         result[4]=list(notify[4]);result[8]=True
         return result
 
-    def route_submit(self,source_connection_id,params):
+    def route_submit(self,source_connection_id,params,version_mask=None):
         self._collect()
-        if not isinstance(params,list) or len(params)!=5 or not all(isinstance(p,str) for p in params):
+        if not isinstance(params,list) or len(params)!=(6 if version_mask is not None else 5) or not all(isinstance(p,str) for p in params):
             raise JobError('Invalid mining.submit')
         job=self.jobs.get(params[1])
         if job is None or not job.valid or job.source_connection_id!=source_connection_id:
@@ -116,6 +117,10 @@ class JobBook:
         # Allow legitimate ntime rolling, but never an ntime older than the issued job.
         if int(ntime,16)<int(job.ntime,16): raise JobError('Invalid ntime')
         upstream=[params[0],job.upstream_job_id,job.extranonce_layout.prefix+extra,ntime,nonce]
+        if version_mask is not None:
+            bits=hex_value(params[5],4)
+            if int(bits,16)&~version_mask: raise JobError('Version bits outside negotiated mask')
+            upstream.append(bits)
         return ShareRoute(job.output_id,job.generation,upstream,job)
 
     def invalidate(self,output_id,generation,clear_prefixes=True):

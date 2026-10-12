@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass,field,replace
 from decimal import Decimal
 from .models import Endpoint,RouterSnapshot,number
-from .protocol import StratumSession,read_message,write_message,ProtocolError,RemoteError
+from .protocol import StratumSession,read_message,write_message,ProtocolError,RemoteError,version_mask
 from .jobs import JobBook,JobError,IncompatibleExtranonce
 from .scheduler import Scheduler
 from .metrics import Metrics
@@ -36,6 +36,8 @@ class InputConnection:
     wake: object = field(default_factory=asyncio.Event)
     sender: object = None
     submits: set = field(default_factory=set)
+    miner_mask: int | None = None
+    version_mask: int | None = None
 
 
 class RouterRuntime:
@@ -136,12 +138,16 @@ class RouterRuntime:
         backoff=.25
         try:
             while self.running:
-                session=StratumSession(slot.endpoint);slot.session=session;slot.state='connecting'
+                session=StratumSession(slot.endpoint,version_rolling=self.snapshot.algorithm=='sha256ab');slot.session=session;slot.state='connecting'
                 started=self.clock()
                 self.log('output_connecting','DEBUG',output_id=key,host=slot.endpoint.host,port=slot.endpoint.port)
                 try:
                     await session.connect();slot.state='awaiting_job';slot.difficulty=Decimal(1);slot.rotate=False
                     self.log('output_authorized',output_id=key,duration_ms=round((self.clock()-started)*1000))
+                    if self.snapshot.algorithm=='sha256ab':
+                        self.log('output_version_rolling',output_id=key,
+                                 status='supported' if session.version_mask is not None else 'unsupported',
+                                 mask=format(session.version_mask or 0,'08x'))
                     while self.running and not session.closed:
                         if slot.rotate: break
                         try: message=await asyncio.wait_for(session.notifications.get(),.1)
@@ -161,6 +167,12 @@ class RouterRuntime:
                             slot.latest=list(params);slot.state='ready';self.scheduler.set_ready(key,True)
                             self.log('output_ready' if first else 'job_received','INFO' if first else 'DEBUG',output_id=key)
                             backoff=.25;self._wake_clients()
+                        elif method=='mining.set_version_mask':
+                            if session.version_mask is None or len(params)!=1:
+                                raise ProtocolError('Unexpected version mask update')
+                            session.version_mask=version_mask(params[0])
+                            self.jobs.invalidate(key,session.generation,clear_prefixes=False)
+                            self._wake_clients()
                         elif method=='mining.set_extranonce':
                             if len(params)!=2 or not isinstance(params[0],str) or not isinstance(params[1],int):
                                 raise ProtocolError('Invalid extranonce update')
@@ -255,12 +267,28 @@ class RouterRuntime:
                 elif method=='mining.extranonce.subscribe': await reply(request_id,True)
                 elif method=='mining.configure':
                     extensions=params[0] if params and isinstance(params[0],list) else []
-                    await reply(request_id,{extension:False for extension in extensions if isinstance(extension,str)})
+                    result={extension:False for extension in extensions if isinstance(extension,str)}
+                    if 'version-rolling' in extensions and self.snapshot and self.snapshot.algorithm=='sha256ab':
+                        if context.miner_mask is not None:
+                            raise ProtocolError('Version rolling already configured')
+                        options=params[1] if len(params)>1 and isinstance(params[1],dict) else {}
+                        requested=version_mask(options.get('version-rolling.mask','ffffffff'))
+                        minimum=options.get('version-rolling.min-bit-count',0)
+                        if isinstance(minimum,bool) or not isinstance(minimum,int) or not 0<=minimum<=32:
+                            raise ProtocolError('Invalid minimum version bit count')
+                        ready=[s.session for s in self.outputs.values() if s.state=='ready' and s.session and not s.session.closed]
+                        common=requested
+                        for session in ready: common &= session.version_mask or 0
+                        if ready and common:
+                            context.miner_mask=requested;context.version_mask=common
+                            result.update({'version-rolling':True,'version-rolling.mask':format(common,'08x')})
+                    await reply(request_id,result)
                     if handshake_count<=32:
                         known={'version-rolling','minimum-difficulty','subscribe-extranonce','info'}
                         names=sorted({e for e in extensions if isinstance(e,str) and e in known})
                         self.log('input_configure_result',connection=context.connection_id,
-                                 extensions=','.join(names),status='unsupported',
+                                 extensions=','.join(names),status='supported' if result.get('version-rolling') is True else 'unsupported',
+                                 mask=format(context.version_mask or 0,'08x'),
                                  count=sum(1 for e in extensions if isinstance(e,str) and e not in known))
                 elif method=='client.get_version': await reply(request_id,'scrypt-hash-router/0.1')
                 elif method=='mining.suggest_difficulty': await reply(request_id,False)
@@ -307,6 +335,17 @@ class RouterRuntime:
                     slot=self.outputs.get(output)
                     if slot and slot.session and slot.latest and not slot.session.closed:
                         try:
+                            if context.miner_mask is not None:
+                                if slot.session.version_mask is None:
+                                    self.log('input_version_wait','DEBUG',connection=context.connection_id,
+                                             output_id=output,reason='output_extension_unsupported')
+                                    try: await asyncio.wait_for(context.wake.wait(),self.snapshot.quantum_seconds)
+                                    except TimeoutError: pass
+                                    continue
+                                mask=context.miner_mask & (slot.session.version_mask or 0)
+                                if mask!=context.version_mask:
+                                    await self._send(context,{'id':None,'method':'mining.set_version_mask','params':[format(mask,'08x')]})
+                                    context.version_mask=mask
                             job=self.jobs.publish(context.connection_id,output,slot.session.generation,
                                 slot.latest,slot.difficulty,slot.session.extranonce1,slot.session.extranonce2_size,'00',2)
                             await self._send(context,{'id':None,'method':'mining.set_difficulty','params':[float(slot.difficulty)]})
@@ -332,11 +371,19 @@ class RouterRuntime:
     async def _submit(self,context,request_id,params):
         started=self.clock()
         try:
-            route=self.jobs.route_submit(context.connection_id,params)
+            route=self.jobs.route_submit(context.connection_id,params,context.version_mask)
             slot=self.outputs.get(route.output_id)
             session=slot.session if slot else None
             if not session or session.closed or session.generation!=route.generation: raise JobError('Stale mining job')
             upstream=list(route.request_params);upstream[0]=session.endpoint.username
+            if session.version_mask is not None:
+                down=context.version_mask or 0
+                if down & ~session.version_mask: raise JobError('Output version mask changed')
+                bits=int(upstream[5],16) if len(upstream)==6 else 0
+                bits |= int(route.job.version,16) & session.version_mask & ~down
+                upstream=upstream[:5]+[format(bits,'08x')]
+            elif context.version_mask is not None:
+                raise JobError('Output does not support version rolling')
             try:
                 accepted=await session.request('mining.submit',upstream)
             except RemoteError:

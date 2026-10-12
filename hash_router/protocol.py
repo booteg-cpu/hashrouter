@@ -2,6 +2,13 @@
 import asyncio
 import json
 import uuid
+import re
+
+
+def version_mask(value):
+    if not isinstance(value,str) or re.fullmatch(r'[0-9a-fA-F]{8}',value) is None:
+        raise ProtocolError('Invalid version mask')
+    return int(value,16)
 
 
 class ProtocolError(ValueError): pass
@@ -32,7 +39,7 @@ async def write_message(writer,message):
 
 
 class StratumSession:
-    def __init__(self,endpoint):
+    def __init__(self,endpoint,version_rolling=False):
         self.endpoint=endpoint
         self.generation=uuid.uuid4().hex
         self.pending={}
@@ -41,17 +48,31 @@ class StratumSession:
         self.counter=0;self.write_lock=asyncio.Lock()
         self.extranonce1=None;self.extranonce2_size=None
         self.closed=True
+        self.version_rolling=version_rolling;self.version_mask=None
 
-    async def connect(self):
+    async def connect(self,negotiate=True):
         await self.close()
         self.generation=uuid.uuid4().hex
         self.notifications=asyncio.Queue(maxsize=256)
         self.counter=0
+        self.version_mask=None
         self.reader,self.writer=await asyncio.wait_for(
             asyncio.open_connection(self.endpoint.host,self.endpoint.port,limit=65537),30)
         self.closed=False
         self.reader_task=asyncio.create_task(self._read_loop())
         try:
+            if self.version_rolling and negotiate:
+                try:
+                    configured=await self.request('mining.configure',[['version-rolling'],
+                        {'version-rolling.mask':'ffffffff','version-rolling.min-bit-count':0}],timeout=5)
+                except RemoteError:
+                    configured=None
+                except (ConnectionError,OSError,TimeoutError):
+                    # Legacy pools may close on an unknown first method.
+                    await self.close()
+                    return await self.connect(negotiate=False)
+                if isinstance(configured,dict) and configured.get('version-rolling') is True:
+                    self.version_mask=version_mask(configured.get('version-rolling.mask'))
             subscription=await self.request('mining.subscribe',['scrypt-hash-router/0.1'])
             if not isinstance(subscription,list) or len(subscription)<3:
                 raise ProtocolError('Invalid subscribe response')
